@@ -1,4 +1,5 @@
 use crate::config::LayoutConfig;
+use crate::metrics::TextMetrics;
 use crate::text_metrics;
 use crate::theme::Theme;
 use crate::unicode_width::{Cluster, consume_cluster, is_cjk_wide_char};
@@ -32,6 +33,7 @@ pub(super) fn measure_label_with_font_size(
         font_size,
         font_family,
         fast_metrics,
+        config.metrics.as_deref(),
     );
     measure_label_with_max_width(text, font_size, max_width_px, config, wrap, font_family)
 }
@@ -47,10 +49,18 @@ pub(super) fn measure_label_with_max_width(
     let raw_lines = split_lines(text);
     let mut lines = Vec::new();
     let fast_metrics = config.fast_text_metrics;
+    let metrics = config.metrics.as_deref();
     let max_width = max_width.max(1.0);
     for line in raw_lines {
         if wrap {
-            let wrapped = wrap_line(&line, max_width, font_size, font_family, fast_metrics);
+            let wrapped = wrap_line(
+                &line,
+                max_width,
+                font_size,
+                font_family,
+                fast_metrics,
+                metrics,
+            );
             lines.extend(wrapped);
         } else {
             lines.push(line);
@@ -64,9 +74,9 @@ pub(super) fn measure_label_with_max_width(
     let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1);
     let max_width = lines
         .iter()
-        .map(|line| text_width(line, font_size, font_family, fast_metrics))
+        .map(|line| text_width(line, font_size, font_family, fast_metrics, metrics))
         .fold(0.0, f32::max);
-    let avg_char = average_char_width(font_family, font_size, fast_metrics);
+    let avg_char = average_char_width(font_family, font_size, fast_metrics, metrics);
     let guard_width = max_len as f32 * avg_char;
     let width = max_width.max(guard_width);
     let height = lines.len() as f32 * font_size * config.label_line_height;
@@ -385,8 +395,9 @@ pub(super) fn wrap_line(
     font_size: f32,
     font_family: &str,
     fast_metrics: bool,
+    metrics: Option<&dyn TextMetrics>,
 ) -> Vec<String> {
-    if text_width(line, font_size, font_family, fast_metrics) <= max_width {
+    if text_width(line, font_size, font_family, fast_metrics, metrics) <= max_width {
         return vec![line.to_string()];
     }
 
@@ -398,7 +409,7 @@ pub(super) fn wrap_line(
         } else {
             format!("{} {}", current, word)
         };
-        if text_width(&candidate, font_size, font_family, fast_metrics) > max_width {
+        if text_width(&candidate, font_size, font_family, fast_metrics, metrics) > max_width {
             if !current.is_empty() {
                 lines.push(current.clone());
                 current.clear();
@@ -414,7 +425,18 @@ pub(super) fn wrap_line(
     lines
 }
 
-pub(super) fn text_width(text: &str, font_size: f32, font_family: &str, fast_metrics: bool) -> f32 {
+pub(super) fn text_width(
+    text: &str,
+    font_size: f32,
+    font_family: &str,
+    fast_metrics: bool,
+    metrics: Option<&dyn TextMetrics>,
+) -> f32 {
+    if let Some(width) =
+        metrics.and_then(|metrics| metrics.measure_text_width(text, font_size, font_family))
+    {
+        return width;
+    }
     if fast_metrics && text.is_ascii() {
         return fallback_text_width(text, font_size);
     }
@@ -441,7 +463,17 @@ fn fallback_text_width(text: &str, font_size: f32) -> f32 {
     width * font_size
 }
 
-fn average_char_width(font_family: &str, font_size: f32, fast_metrics: bool) -> f32 {
+fn average_char_width(
+    font_family: &str,
+    font_size: f32,
+    fast_metrics: bool,
+    metrics: Option<&dyn TextMetrics>,
+) -> f32 {
+    if let Some(width) =
+        metrics.and_then(|metrics| metrics.average_char_width(font_family, font_size))
+    {
+        return width;
+    }
     if fast_metrics {
         return font_size * 0.56;
     }
@@ -453,8 +485,9 @@ fn max_label_width_px(
     font_size: f32,
     font_family: &str,
     fast_metrics: bool,
+    metrics: Option<&dyn TextMetrics>,
 ) -> f32 {
-    let avg_char = average_char_width(font_family, font_size, fast_metrics);
+    let avg_char = average_char_width(font_family, font_size, fast_metrics, metrics);
     (max_chars.max(1) as f32) * avg_char
 }
 
@@ -520,9 +553,36 @@ mod tests {
         );
     }
 
+    /// Measures every character as one em, which the built-in estimates never
+    /// do, so a width can only come from here.
+    #[derive(Debug)]
+    struct OneEm;
+
+    impl TextMetrics for OneEm {
+        fn measure_text_width(
+            &self,
+            text: &str,
+            font_size: f32,
+            _font_family: &str,
+        ) -> Option<f32> {
+            Some(text.chars().count() as f32 * font_size)
+        }
+    }
+
+    #[test]
+    fn fast_metrics_still_ask_the_host_first() {
+        let width = text_width("Hello", 10.0, "serif", true, Some(&OneEm));
+        assert_eq!(width, 50.0);
+        let average = average_char_width("serif", 10.0, true, Some(&OneEm));
+        assert_eq!(average, 10.0);
+        // Without a host, the fast estimates stand.
+        assert!(text_width("Hello", 10.0, "serif", true, None) < 50.0);
+        assert_eq!(average_char_width("serif", 10.0, true, None), 5.6);
+    }
+
     #[test]
     fn wrap_line_does_not_wrap_short_text() {
-        let result = wrap_line("short", 1000.0, 16.0, "sans-serif", true);
+        let result = wrap_line("short", 1000.0, 16.0, "sans-serif", true, None);
         assert_eq!(result.len(), 1);
     }
 
@@ -534,6 +594,7 @@ mod tests {
             16.0,
             "sans-serif",
             true,
+            None,
         );
         assert!(result.len() > 1, "expected wrapping, got {:?}", result);
     }

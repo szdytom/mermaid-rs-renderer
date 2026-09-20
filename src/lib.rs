@@ -96,6 +96,7 @@ pub mod error;
 pub mod ir;
 pub mod layout;
 pub mod layout_dump;
+pub mod metrics;
 pub mod parser;
 pub mod render;
 mod text_metrics;
@@ -115,6 +116,7 @@ pub use layout::{
     EdgeLayout, Layout, LayoutStageMetrics, NodeLayout, SubgraphLayout, compute_layout,
     compute_layout_with_metrics,
 };
+pub use metrics::TextMetrics;
 pub use parser::{ParseOutput, parse_mermaid};
 #[cfg(feature = "png")]
 pub use render::write_output_png;
